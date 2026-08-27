@@ -1,0 +1,62 @@
+# Publish to npm when a version tag is pushed.
+#
+# The tag is the trigger and the version is the package's own: the guard below refuses
+# a tag that disagrees with package.json, because a mis-tagged release cannot be undone
+# on a registry — only superseded.
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      # A `-dry.N` suffix means REHEARSAL: everything runs, nothing uploads. It is the
+      # only way to exercise the tag trigger itself, and it leaves nothing behind — a
+      # published version can never be withdrawn, only superseded.
+      - name: tag matches package.json
+        id: tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          case "$tag" in
+            *-dry.*) echo "dry=true" >> "$GITHUB_OUTPUT"; tag="${tag%-dry.*}" ;;
+            *)       echo "dry=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v$tag does not match package.json $pkg"
+            exit 1
+          fi
+
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/smoke.mjs
+      # A prerelease must NOT become `latest`. `npm publish` applies the `latest`
+      # dist-tag to whatever it uploads unless told otherwise, so `0.2.5-rc.0` would
+      # land on every `npm install` with no version pinned. Anything with a hyphen in
+      # its version goes to `next` instead, which is what makes a release rehearsal
+      # safe: it publishes for real, and nobody gets it by accident.
+      - name: publish
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "${{ steps.tag.outputs.dry }}" = "true" ]; then
+            npm publish --dry-run
+            echo "REHEARSAL: $version was packed and validated, nothing was uploaded"
+            exit 0
+          fi
+          case "$version" in
+            *-*) npm publish --tag next && echo "published $version under dist-tag: next" ;;
+            *)   npm publish && echo "published $version under dist-tag: latest" ;;
+          esac
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

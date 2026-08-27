@@ -1,0 +1,29 @@
+# Build gate for the published package.
+#
+# Deliberately shallow: it proves the tree installs, bundles, and produces an entry
+# point that imports. The behavioural suite lives in the monorepo this repository is
+# exported from, and runs before anything reaches here.
+#
+# This file is generated. Edits made here are replaced on the next sync — the
+# change belongs in the repository this one is exported from.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/smoke.mjs

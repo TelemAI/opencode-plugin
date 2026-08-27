@@ -1,0 +1,31 @@
+{
+  "name": "@telemai/opencode-plugin",
+  "version": "0.2.5",
+  "description": "Telem web search and page fetch tools for opencode.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --external:@opencode-ai/plugin --outfile=dist/index.js --minify-whitespace --minify-syntax --legal-comments=none",
+    "prepack": "npm run build",
+    "test": "node scripts/smoke.mjs"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.17.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.17.15",
+    "esbuild": "^0.24.0"
+  }
+}
