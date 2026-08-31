@@ -1,6 +1,6 @@
 {
   "name": "@telemai/opencode-plugin",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Telem web search and page fetch tools for opencode.",
   "type": "module",
   "license": "Apache-2.0",
