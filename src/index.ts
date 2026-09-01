@@ -12,10 +12,19 @@ import { createHash, randomUUID } from "node:crypto"
 import {
   createConfigReader,
   createNoticeSink,
+  isBehind,
   readCredentials,
   resolveHarnessOptions,
 } from "../config-core/index.ts"
 import type { TelemOptions } from "../config-core/index.ts"
+// The injected, package.json-lockstep self-version. The per-surface
+// update command is a hand-inlined LITERAL (OPENCODE_UPDATE_COMMAND, below) rather
+// than an import of the shared corpus JSON: the published package ships `dist/`
+// only, not the config-core fixtures, so the JSON cannot be read at runtime — and
+// importing it inlined the whole file (its internal `_note`/`_pending` prose
+// included) into the bundle. A test pins the literal equal to the corpus row, the
+// same anti-drift pattern openclaw and the SDK use.
+import { PLUGIN_VERSION } from "./version.ts"
 
 const HISTORY_TEXT_CAP = 128000 // per-message cap; opencode tool results can embed whole files
 
@@ -59,6 +68,86 @@ type TelemConfig = TelemOptions & { baseUrl: string; apiKey?: string }
 // changes — together, one warning per EDIT rather than one per search.
 const readConfigFile = createConfigReader((message: string) => console.warn(message))
 const emitNotices = createNoticeSink((message: string) => console.warn(message))
+
+// ---------------------------------------------------------------------------
+// Client update advisory (spec the design notes
+// On a 2xx search/fetch whose body parsed, the server MAY name the version
+// it recommends for THIS surface. If our injected PLUGIN_VERSION is strictly
+// behind it, we show a ONE-TIME, OFF-MODEL toast naming opencode's update
+// command — never the tool result the model reads. Notify-only: this compares
+// versions and displays a message; it NEVER updates anything.
+//
+// The comparison (`isBehind`) is a shared, drift-pinned piece imported from
+// config-core; the update command is a hand-inlined literal
+// (OPENCODE_UPDATE_COMMAND). Everything below is the thin per-surface SHELL — env
+// opt-out, TTY/CI detection, the toast — which T4/T5 re-implement for
+// openclaw/pi.
+//
+// DEDUP IS PER LAUNCH ON THIS SURFACE — in-process only, NO cross-run stamp
+// opencode is the one surface that deliberately does not write
+// `~/.telem/update-notice.json`, and the real-host gate is why:
+//   * The toast is only ever VISIBLE in the TUI, and the TUI is a long-lived
+//     process — the module-scope `advisoryNotified` Set below already shows it
+//     once per recommended version there. There is no per-call spam to prevent.
+//   * In a headless `opencode run` (stdin IS a TTY, but no TUI is attached)
+//     `client.tui.showToast` resolves with HTTP 200 and NO error for a toast that
+//     nothing renders. A delivery-gated stamp therefore cannot tell "shown" from
+//     "silently dropped", so a per-version-per-day stamp written by an invisible
+//     headless toast would WRONGLY SILENCE a real TUI session later the same day
+//     — measured: the stamp appeared after a headless run, and the TUI only
+//     toasted once it was cleared.
+// Net effect: a TUI user who is behind sees one toast per launch until they
+// update — never suppressed for a notice they did not see. pi and openclaw KEEP
+// the per-version-per-day stamp (`noticeAlreadyShown` in config-core): their
+// `console.warn` IS visible in a one-shot run, so cross-run dedup earns its place
+// there.
+//
+// The advisory KEY is a FIXED LITERAL, decoupled from HARNESS_ID:
+// this surface always reads `recommended.opencode`, never its trajectory id.
+const ADVISORY_KEY = "opencode"
+const UPDATE_TOAST_TITLE = "Telem plugin update"
+
+// The exact opencode update instruction — hand-inlined equal to the shared
+// corpus's `"opencode"` row (the shared config contract). It is a
+// LITERAL (not an import of the JSON) because the published bundle ships `dist/`
+// only and cannot read the fixtures at runtime; its own suite pins
+// this `===` that row. NOT exported — the opencode loader instantiates every
+// runtime export of this entry file as a plugin factory, so the factory stays the
+// only export (a bare-string export would crash the host).
+const OPENCODE_UPDATE_COMMAND =
+  "opencode does not auto-update plugins. To pick up a newer @telemai/opencode-plugin, remove its cached copy (rm -rf ~/.cache/opencode/packages/@telemai) and relaunch opencode."
+
+// In-process dedup, keyed by the recommended version string: a
+// long-lived `serve` re-notifies ONCE per server-bumped version, never per call,
+// and a same-version re-run stays silent. Module scope so it outlives calls.
+const advisoryNotified = new Set<string>()
+
+// The `body.client_advisory?.recommended?.opencode` path — silent (undefined) on
+// a null/absent/malformed field, never a throw (spec read step, rule 5).
+function readAdvisoryVersion(body: unknown): string | undefined {
+  if (!body || typeof body !== "object") return undefined
+  const advisory = (body as Record<string, unknown>).client_advisory
+  if (!advisory || typeof advisory !== "object") return undefined
+  const recommended = (advisory as Record<string, unknown>).recommended
+  if (!recommended || typeof recommended !== "object") return undefined
+  const value = (recommended as Record<string, unknown>)[ADVISORY_KEY]
+  return typeof value === "string" ? value : undefined
+}
+
+// Env-only opt-out: `TELEM_NO_UPDATE_NOTICE=1` suppresses
+// entirely. Matches the shipped env-flag rule (`optionFromEnv`: only "1" turns a
+// flag on); trimmed so a stray space does not defeat the lever.
+function updateNoticeOptedOut(): boolean {
+  return (process.env.TELEM_NO_UPDATE_NOTICE ?? "").trim() === "1"
+}
+
+// Non-interactive one-shots (`opencode run`, piped stdin, CI) are a fresh
+// process per call with an empty in-memory dedup — they would toast on EVERY
+// run, and a toast only makes sense in a TUI anyway. Suppress there;
+// re-implemented per surface (create-telemai's copy is not importable).
+function updateNoticeSuppressedByContext(): boolean {
+  return !process.stdin.isTTY || Boolean(process.env.CI)
+}
 
 // `projectRoot` is opencode's own project directory (PluginInput.directory).
 // The cwd is only the fallback for hosts that do not supply one — it is not the
@@ -1075,6 +1164,75 @@ export const TelemPlugin: Plugin = async ({ client, directory }, options?: Plugi
     }
   }
 
+  // The off-model channel for the update advisory. opencode routes
+  // its config warnings to `console.warn` (`emitNotices`), which is invisible in
+  // opencode's TUI — so the version notice is a TUI toast instead, a UI popup the
+  // model never reads.
+  //
+  // The channel is `client.tui.showToast({ body })` — the ONLY toast method on
+  // the SDK client `PluginInput.client` (`createOpencodeClient`), hitting
+  // `/tui/show-toast`; `body` is `{ title?, message, variant, duration? }`. (The
+  // `client.tui.toast(TuiToast)` shape is a DIFFERENT interface — the plugin
+  // `tui`-extension API in `@opencode-ai/plugin/dist/tui.d.ts` — and does not
+  // exist on this client.) `showToast` may be absent outside a TUI context (e.g.
+  // `opencode run`), so it is GUARDED and skipped silently, never thrown (rule 1).
+  //
+  // FIRE-AND-FORGET, and deliberately so: nothing downstream depends on the
+  // result. The delivery result carries no information we could act on — a
+  // headless `opencode run` with no TUI attached resolves 200-with-no-error for a
+  // toast nothing renders (real-host gate, spec) — so there is nothing to
+  // gate on and no stamp to write. The turn must never block on or be broken by a
+  // toast, so the promise is never awaited and a rejection is swallowed.
+  function showUpdateToast(recommended: string, command: string): void {
+    const tui = (client as unknown as { tui?: Record<string, unknown> })?.tui
+    if (typeof tui?.showToast !== "function") return
+    const message = `A newer Telem opencode plugin (${recommended}) is available. ${command}`
+    try {
+      void Promise.resolve(
+        (tui.showToast as (input: unknown) => unknown)({
+          body: { title: UPDATE_TOAST_TITLE, message, variant: "info" },
+          query: directory ? { directory } : undefined,
+        }),
+      ).catch(() => {
+        /* delivery failed ⇒ nothing shown; never into the turn */
+      })
+    } catch {
+      /* a synchronous throw ⇒ nothing shown, never into the turn */
+    }
+  }
+
+  // The per-surface SHELL of the update advisory, called right
+  // after `recordDelivery` at both post-parse sites. Gates, IN THIS ORDER — each
+  // reads from where the comment says — then toasts once PER LAUNCH. Everything is
+  // wrapped: a malformed field, a missing `client.tui`, all silently no-op (rule
+  // 5). It NEVER touches the tool result the model reads. There is deliberately no
+  // fs gate here and nothing is persisted — see the ADVISORY_KEY block above for
+  // why opencode is per-launch while pi/openclaw keep a per-day stamp.
+  function maybeNotifyClientUpdate(body: unknown): void {
+    try {
+      // 1. opt-out          ← env (TELEM_NO_UPDATE_NOTICE)
+      if (updateNoticeOptedOut()) return
+      // 2. non-interactive  ← tty/env (process.stdin.isTTY, process.env.CI)
+      if (updateNoticeSuppressedByContext()) return
+      // 3. read the advisory ← the parsed response body (fixed literal key)
+      const recommended = readAdvisoryVersion(body)
+      if (recommended === undefined) return
+      // 4. in-process once  ← module-scope Set, keyed by the version string
+      if (advisoryNotified.has(recommended)) return
+      // 5. behind?          ← shared comparator over the injected PLUGIN_VERSION
+      if (!isBehind(PLUGIN_VERSION, recommended)) return
+      // 6. mark BEFORE toasting — the dedup must be synchronous, so one process
+      //    never double-toasts while an async delivery is still in flight. Marking
+      //    a version whose toast then had no channel is the safe direction: the
+      //    channel is missing for the life of this plugin instance anyway.
+      advisoryNotified.add(recommended)
+      // 7. the command      ← inlined literal, pinned to the shared corpus by a test
+      showUpdateToast(recommended, OPENCODE_UPDATE_COMMAND)
+    } catch {
+      /* malformed/missing everything ⇒ silent, never throw into the turn */
+    }
+  }
+
   // Put every withheld context back into the body this call already built.
   //
   // Un-marking comes FIRST and is not conditional on the retry succeeding: the
@@ -1544,6 +1702,10 @@ export const TelemPlugin: Plugin = async ({ client, directory }, options?: Plugi
           // trajectory write (Phase B, committed before the search runs) landed —
           // those ancestor contexts are in the database either way.
           recordDelivery(delivery, interaction)
+          // Client update advisory: off-model, never the render
+          // below. Runs BEFORE the V2 gate for the same reason recordDelivery
+          // does — it is a separate concern from whether this answer renders.
+          maybeNotifyClientUpdate(interaction)
           // Refuse a pre-V2 answer before rendering anything (see the gate).
           assertV2Envelope(interaction)
           const sessionId = interaction.session_id ? String(interaction.session_id) : undefined
@@ -1664,6 +1826,8 @@ export const TelemPlugin: Plugin = async ({ client, directory }, options?: Plugi
           // through the same handler, so a fetch 2xx is delivery proof for a
           // later search exactly as a search's is for a later fetch.
           recordDelivery(delivery, interaction)
+          // Client update advisory: off-model, never the fetch render.
+          maybeNotifyClientUpdate(interaction)
           const sessionId = interaction.session_id ? String(interaction.session_id) : undefined
           return {
             output: formatFetchResults(interaction),

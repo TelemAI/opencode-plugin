@@ -43,6 +43,8 @@ export type { Env, TelemDir, TelemFileRead } from "./files.ts"
 export { resolveOptions } from "./resolve.ts"
 export type { Resolution, ResolveInput, SourceLevel } from "./resolve.ts"
 
+export { isBehind, noticeAlreadyShown, updateCommandFor } from "./version.ts"
+
 export {
   LAYER_LEVELS,
   createConfigReader,
