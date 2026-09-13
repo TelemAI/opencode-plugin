@@ -218,6 +218,14 @@ function buildSearchBlock(options: TelemOptions): Record<string, unknown> | null
     // body carries nothing exotic.
     block.provider_overrides = { ...options.providerOverrides }
   }
+  // The routing keys are env-only on purpose: they are not config-file options.
+  const env = process.env
+  const autoRouting = env.TELEM_AUTO_ROUTING?.trim()
+  if (autoRouting) block.auto_routing = autoRouting
+  const count = env.TELEM_MAX_ROUTING_PROVIDERS
+  if (count !== undefined && /^\s*[+-]?\d+\s*$/.test(count)) block.max_routing_providers = Number(count)
+  const topic = env.TELEM_TOPIC?.trim()
+  if (topic) block.topic = topic
   return Object.keys(block).length ? block : null
 }
 
