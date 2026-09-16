@@ -62,7 +62,18 @@ export function resolveOptions(input: ResolveInput): Resolution {
     const coerce = COERCERS[spec.coercion]
     let resolved: unknown
     let level: SourceLevel | undefined
+    // `autoRouting` is the ONE key where the environment outranks every file: an
+    // operator's shell value must win over a checked-in file. Every other key is
+    // file-beats-env, which is what the rest of this loop does.
+    if (spec.key === "autoRouting") {
+      const fromEnvFirst = optionFromEnv(spec, env)
+      if (fromEnvFirst !== undefined) {
+        resolved = fromEnvFirst
+        level = "env"
+      }
+    }
     for (const layer of layers) {
+      if (level !== undefined) break
       if (!layer.data) continue
       // Own-property only: a key like `constructor` inherited from Object.prototype
       // is not config, and JSON.parse produces no other inherited keys.

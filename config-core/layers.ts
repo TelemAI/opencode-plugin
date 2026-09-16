@@ -261,7 +261,18 @@ export function resolveHarnessOptions(input: HarnessLayersInput): HarnessResolut
     const coerce = COERCERS[spec.coercion]
     let resolved: unknown
     let level: LayerLevel | undefined
+    // `autoRouting` is the ONE key where the environment outranks every file: an
+    // operator's shell value must win over a checked-in file. Every other key is
+    // file-beats-env, which is the rule the rest of this loop implements.
+    if (spec.key === "autoRouting") {
+      const fromEnvFirst = optionFromEnv(spec, input.env)
+      if (fromEnvFirst !== undefined) {
+        resolved = fromEnvFirst
+        level = "env"
+      }
+    }
     for (const candidateLevel of LAYER_LEVELS) {
+      if (level !== undefined) break
       if (candidateLevel === "env") break
       const layer = data.get(candidateLevel)
       if (!layer) continue

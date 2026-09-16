@@ -218,10 +218,11 @@ function buildSearchBlock(options: TelemOptions): Record<string, unknown> | null
     // body carries nothing exotic.
     block.provider_overrides = { ...options.providerOverrides }
   }
-  // The routing keys are env-only on purpose: they are not config-file options.
+  // autoRouting is a config-file key, resolved like every other option (for this one
+  // key the env beats the file, which the shared resolver already applied).
+  if (options.autoRouting !== undefined) block.auto_routing = options.autoRouting
+  // topic and the count stay env-only: they are not config-file options.
   const env = process.env
-  const autoRouting = env.TELEM_AUTO_ROUTING?.trim()
-  if (autoRouting) block.auto_routing = autoRouting
   const count = env.TELEM_MAX_ROUTING_PROVIDERS
   if (count !== undefined && /^\s*[+-]?\d+\s*$/.test(count)) block.max_routing_providers = Number(count)
   const topic = env.TELEM_TOPIC?.trim()
@@ -1585,6 +1586,13 @@ export const TelemPlugin: Plugin = async ({ client, directory }, options?: Plugi
                 "plugin owns the session here, so this field only labels the step in the " +
                 "trajectory: send it on every search where you know the task.",
             ),
+          topic: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "Optional. Set it only when the answer must come from one site: linkedin, reddit, " +
+                "or x (twitter is also accepted). Leave it unset otherwise.",
+            ),
         },
         async execute(args, ctx) {
           // Drop blank/whitespace-only queries so an all-empty batch is caught here
@@ -1675,7 +1683,11 @@ export const TelemPlugin: Plugin = async ({ client, directory }, options?: Plugi
           // definition-backed provider in `preprocessor_names` is a 400 ("use
           // search.providers"), so telem_search never sends that key at all.
           // The block itself rides only on deviation — absent means defaults.
-          const search = buildSearchBlock(config)
+          // The model's per-call topic, trimmed, beats TELEM_TOPIC. The routing mode is
+          // never taken from the model: it comes from the autoRouting config key.
+          const topic = typeof args.topic === "string" ? args.topic.trim() : ""
+          const configured = buildSearchBlock(config)
+          const search = topic ? { ...configured, topic } : configured
           if (search) body.search = search
 
           const headers: Record<string, string> = { "Content-Type": "application/json" }

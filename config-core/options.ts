@@ -202,6 +202,17 @@ export const TELEM_OPTIONS = [
       'Raw per-provider request parameters, merged into that provider\'s request only: ' +
       '{"exa": {"numResults": 2}}. Unvalidated passthrough — the server owns the names.',
   },
+  {
+    key: "autoRouting",
+    jsonType: "string",
+    coercion: "name",
+    env: "TELEM_AUTO_ROUTING",
+    envAliases: [],
+    description:
+      "Let the server choose which providers run each search, and what to optimise for: " +
+      "accuracy, latency, or search_cost. Unset means the configured provider set runs. " +
+      "Unlike every other key, TELEM_AUTO_ROUTING overrides this file.",
+  },
 ] as const satisfies readonly TelemOptionSpec[]
 
 /** The shape every entry of {@link TELEM_OPTIONS} conforms to. */
