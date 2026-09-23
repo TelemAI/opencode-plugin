@@ -160,10 +160,15 @@ export type HarnessLayersInput = {
    * The user layers are unaffected. Defaults to `true`.
    */
   projectLayers?: boolean
-  /** Level 3 segments under the project root, e.g. `[".opencode", "telem.json"]`. */
-  legacyProject: readonly string[]
-  /** Level 4 segments under the user's home, e.g. `[".config", "opencode", "telem.json"]`. */
-  legacyUser: readonly string[]
+  /**
+   * Level 3 segments under the project root, e.g. `[".opencode", "telem.json"]`.
+   * ABSENT for a surface that never had a deprecated host file (DSH): the level
+   * is then not looked at — an empty array is NOT the same thing, it would name
+   * the project root itself and read a directory as a file.
+   */
+  legacyProject?: readonly string[]
+  /** Level 4 segments under the user's home, e.g. `[".config", "opencode", "telem.json"]`; absent = no level 4. */
+  legacyUser?: readonly string[]
   read: ConfigReader
 }
 
@@ -237,11 +242,12 @@ export function resolveHarnessOptions(input: HarnessLayersInput): HarnessResolut
     data.set(level, read.data)
   }
 
+  const { legacyProject, legacyUser } = input
   if (projectRoot !== undefined && projectLayers) {
     addFile("project", safely(() => projectConfigPath(projectRoot)))
-    addFile("legacyProject", safely(() => join(projectRoot, ...input.legacyProject)))
+    if (legacyProject) addFile("legacyProject", safely(() => join(projectRoot, ...legacyProject)))
   }
-  addFile("legacyUser", safely(() => join(homeDir(input.env), ...input.legacyUser)))
+  if (legacyUser) addFile("legacyUser", safely(() => join(homeDir(input.env), ...legacyUser)))
 
   // The user `.telem` directory is resolved even when the project layers are
   // gated off: the "a repo may not redirect config at itself" refusal is about
