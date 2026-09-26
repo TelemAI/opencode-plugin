@@ -139,10 +139,16 @@ export const COERCERS: Record<CoercionClass, (value: unknown) => unknown> = {
 }
 
 /**
- * The six option keys. `env` is the variable each key falls back to; `envAliases`
- * are DEPRECATED variables read below it (v1 names kept working). `providerOverrides`
- * has no env form on purpose — a JSON blob in a shell variable is not a config
- * surface anyone should be pushed toward.
+ * The option keys: the search options first, then the three fetch options, added
+ * last so that no existing entry moves. `env` is the variable each key falls back
+ * to; `envAliases` are DEPRECATED variables read below it (v1 names kept working).
+ * `providerOverrides` has no env form on purpose — a JSON blob in a shell variable
+ * is not a config surface anyone should be pushed toward.
+ *
+ * The fetch keys resolve like every other key; what differs is who SENDS them. A
+ * search never does — each search consumer builds its block by key name, and the
+ * Python accessor scopes its resolution to the search keys — so they reach a
+ * request only through a surface's own fetch block builder.
  */
 export const TELEM_OPTIONS = [
   {
@@ -212,6 +218,37 @@ export const TELEM_OPTIONS = [
       "Let the server choose which providers run each search, and what to optimise for: " +
       "accuracy, latency, or search_cost. Unset means the configured provider set runs. " +
       "Unlike every other key, TELEM_AUTO_ROUTING overrides this file.",
+  },
+  {
+    key: "fetchProviders",
+    jsonType: "array",
+    coercion: "nameList",
+    env: "TELEM_FETCH_PROVIDERS",
+    envAliases: [],
+    description:
+      "Fetch providers to try, in order, replacing the deployment's fetch chain " +
+      "(e.g. exa, firecrawl). One name means no failover. A pinned fetch fills no shared " +
+      "cache row.",
+  },
+  {
+    key: "fetchTier",
+    jsonType: "string",
+    coercion: "name",
+    env: "TELEM_FETCH_TIER",
+    envAliases: [],
+    description:
+      "Fetch tier: minimalist, default, extended, or max. Sets which fields providers are " +
+      "asked for; max also allows paid provider options.",
+  },
+  {
+    key: "fetchNoCache",
+    jsonType: "boolean",
+    coercion: "flag",
+    env: "TELEM_FETCH_NO_CACHE",
+    envAliases: [],
+    description:
+      "Skip the shared fetch cache: every page read is a live provider call, billed at the " +
+      "same list rate a cache hit is, that fills no shared row. Off unless set.",
   },
 ] as const satisfies readonly TelemOptionSpec[]
 
