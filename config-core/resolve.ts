@@ -10,7 +10,7 @@ import { join } from "node:path"
 import type { Env } from "./files.ts"
 import { CONFIG_FILE_NAME, projectConfigPath, readTelemFile, resolveTelemDir } from "./files.ts"
 import type { TelemOptionKey, TelemOptions } from "./options.ts"
-import { COERCERS, TELEM_OPTIONS, optionFromEnv } from "./options.ts"
+import { COERCERS, TELEM_OPTIONS, dropAutoRoutingOff, optionFromEnv } from "./options.ts"
 
 /** Which layer supplied a key. Top wins. */
 export type SourceLevel = "project" | "user" | "env"
@@ -97,6 +97,7 @@ export function resolveOptions(input: ResolveInput): Resolution {
       sources[spec.key] = level
     }
   }
+  dropAutoRoutingOff(values, sources)
 
   return {
     values: values as TelemOptions,

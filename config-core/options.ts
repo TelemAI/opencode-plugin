@@ -91,6 +91,22 @@ export function asName(value: unknown): string | undefined {
   return trimBlank(raw) || undefined
 }
 
+/**
+ * `autoRouting: "off"` (any case) means "do not route": the router only accepts a
+ * mode, and answers 422 for "off". Applied AFTER precedence, so an "off" still
+ * outranks a lower layer's mode; it then resolves to absent and no request carries
+ * `auto_routing`.
+ */
+export function dropAutoRoutingOff(
+  values: Record<string, unknown>,
+  sources: Record<string, unknown>,
+): void {
+  if (typeof values.autoRouting === "string" && values.autoRouting.toLowerCase() === "off") {
+    delete values.autoRouting
+    delete sources.autoRouting
+  }
+}
+
 export function asNameList(value: unknown): string[] | undefined {
   const raw = normalizeEmpty(value)
   if (!Array.isArray(raw)) return undefined
@@ -216,7 +232,7 @@ export const TELEM_OPTIONS = [
     envAliases: [],
     description:
       "Let the server choose which providers run each search, and what to optimise for: " +
-      "accuracy, latency, or search_cost. Unset means the configured provider set runs. " +
+      'accuracy, latency, or search_cost. Unset or "off" means the configured provider set runs. ' +
       "Unlike every other key, TELEM_AUTO_ROUTING overrides this file.",
   },
   {

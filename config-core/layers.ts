@@ -38,7 +38,7 @@ import {
   resolveTelemDir,
 } from "./files.ts"
 import type { TelemOptionKey, TelemOptions } from "./options.ts"
-import { COERCERS, TELEM_OPTIONS, optionFromEnv } from "./options.ts"
+import { COERCERS, TELEM_OPTIONS, dropAutoRoutingOff, optionFromEnv } from "./options.ts"
 
 /** Which layer supplied a key. */
 export type LayerLevel = "host" | "project" | "legacyProject" | "legacyUser" | "user" | "env"
@@ -305,6 +305,7 @@ export function resolveHarnessOptions(input: HarnessLayersInput): HarnessResolut
       sources[spec.key] = level
     }
   }
+  dropAutoRoutingOff(values, sources)
 
   notices.push(...legacyNotices(layers, projectRoot))
   const project = projectNotice(layers, sources)
