@@ -31,6 +31,9 @@ This writes the plugin entry to OpenCode's config file (`opencode.jsonc`,
 despite the `.json`-sounding name) and materializes the package — one command
 for both.
 
+On OpenCode 2.x, use `opencode plugin add @telemai/opencode-plugin` instead.
+The plugin works on OpenCode 1.17.0 or newer, including 2.x.
+
 ### Manual alternative
 
 Add the package to the `plugin` array in `opencode.jsonc` yourself:

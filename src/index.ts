@@ -1066,12 +1066,14 @@ function continuesEpoch(previous: HistoryEpoch, flat: FlatMessage[]): boolean {
 // and never threads a model session_id — a request carrying session_key is a v5
 // request. Bookkeeping never throws out of execute — any failure degrades to a
 // best-effort self key with no ancestors.
-// opencode instantiates EVERY runtime export of a plugin file as a plugin
-// factory: a second export is called with the plugin input and whatever it
-// returns is used as the hooks object. `buildSearchBlock` returning null was
-// exactly the "null is not an object (evaluating N.config)" crash that took
-// opencode down on every message. THE FACTORY IS THE ONLY EXPORT — keep
-// helpers module-private and test them through TelemPlugin.
+// Without a `{ id, server }` default export, opencode 1.x instantiates EVERY
+// runtime export of a plugin file as a plugin factory: a second export is
+// called with the plugin input and whatever it returns is used as the hooks
+// object. `buildSearchBlock` returning null was exactly the "null is not an
+// object (evaluating N.config)" crash that took opencode down on every
+// message. The default export at the bottom now routes both hosts, but keep
+// the exports to TelemPlugin and that default — helpers stay module-private
+// and are tested through TelemPlugin.
 //
 // `options` is opencode's plugin-tuple options object (level 1 of the config
 // ladder) — `plugin: [["@telemai/opencode-plugin", { "tier": "max" }]]` in
@@ -1858,3 +1860,140 @@ export const TelemPlugin: Plugin = async ({ client, directory }, options?: Plugi
     },
   }
 }
+
+// ---------------------------------------------------------------------------
+// opencode 2.x. The 2.0 loader refuses a module without a default export of
+// `{ id, setup }` (or `{ id, effect }`), and its plugin API shares nothing with
+// 1.x: tools register through `ctx.tool.transform`, permissions through
+// `ctx.agent.transform`, and sessions are read through `ctx.session`. Rather
+// than fork the plugin, this adapter hands TelemPlugin a 1.x-shaped client
+// built over the 2.0 session API and registers the hooks it returns — so both
+// hosts run the exact same search, fetch, and trajectory code.
+//
+// 1.x reads the same default object through its own `{ id, server }` contract
+// and never looks at `setup`; 2.x decodes `{ id, setup }` and ignores `server`.
+// ---------------------------------------------------------------------------
+
+// A 2.0 timestamp reaches a plugin either encoded (epoch millis) or decoded
+// (an Effect DateTime carrying `epochMillis`); read both.
+function epochMillis(value: any): number | undefined {
+  if (typeof value === "number") return value
+  if (typeof value?.epochMillis === "number") return value.epochMillis
+  return value instanceof Date ? value.getTime() : undefined
+}
+
+// 2.0 session messages -> the 1.x `{ info, parts }` rows the trajectory code
+// reads. Only what that code looks at is mapped: user text, assistant text /
+// reasoning / tool calls, and completed compactions (the session_key input).
+// Every other 2.0 message kind (shell, skill, system, agent switches, idle
+// markers) has no 1.x counterpart in the history and is dropped.
+function toV1Messages(messages: readonly any[] | undefined): any[] {
+  const rows: any[] = []
+  for (const message of messages ?? []) {
+    const info = {
+      id: message?.id,
+      role: message?.type,
+      time: { created: epochMillis(message?.time?.created) },
+    }
+    if (message?.type === "user") {
+      rows.push({ info, parts: [{ type: "text", text: message.text }] })
+    } else if (message?.type === "assistant") {
+      const parts = (message.content ?? []).map((part: any) =>
+        part?.type === "tool"
+          ? {
+              type: "tool",
+              id: part.id,
+              tool: part.name,
+              // A call still streaming its arguments holds a partial JSON
+              // string; 1.x called that state pending with no input yet.
+              state:
+                part.state?.status === "streaming"
+                  ? { status: "pending", input: {} }
+                  : { status: part.state?.status, input: part.state?.input },
+            }
+          : part,
+      )
+      rows.push({ info, parts })
+    } else if (message?.type === "compaction" && message.status === "completed") {
+      rows.push({ info, parts: [{ type: "compaction", id: message.id }] })
+    }
+  }
+  return rows
+}
+
+// The two 1.x client calls TelemPlugin makes, over the 2.0 session API.
+// `session.context` returns the current context window (from the latest
+// completed compaction on), which is the window `session_key` names.
+function v1ClientFor(session: any) {
+  return {
+    session: {
+      get: async ({ path }: { path: { id: string } }) => ({
+        data: await session.get({ sessionID: path.id }),
+      }),
+      messages: async ({ path }: { path: { id: string } }) => ({
+        data: toV1Messages(await session.context({ sessionID: path.id })),
+      }),
+    },
+  }
+}
+
+async function setupV2(ctx: any): Promise<void> {
+  const directory = ctx.location?.directory
+  const hooks: any = await TelemPlugin({ client: v1ClientFor(ctx.session), directory } as any, ctx.options)
+
+  // The 1.x `config` hook's grants, as 2.0 permission rules. Rules are
+  // last-match-wins, and user config is applied AFTER every plugin, so an
+  // explicit user rule for any of these still beats ours — the same
+  // fill-only-unset stance as 1.x. Hidden agents (title, summary, compaction)
+  // never call tools and keep their deny-all.
+  const rules = [
+    { action: "telem_search", resource: "*", effect: "allow" },
+    { action: "telem_fetch", resource: "*", effect: "allow" },
+  ]
+  if (process.env.TELEM_ALLOW_BUILTIN_WEBFETCH !== "1") {
+    rules.push({ action: "webfetch", resource: "*", effect: "deny" })
+  }
+  await ctx.agent.transform((agents: any) => {
+    for (const agent of agents.list()) {
+      if (agent.hidden) continue
+      agents.update(agent.id, (item: any) => item.permissions.push(...rules))
+    }
+  })
+
+  await ctx.tool.transform((tools: any) => {
+    for (const [name, definition] of Object.entries<any>(hooks.tool)) {
+      const input = tool.schema.object(definition.args)
+      tools.add({
+        name,
+        description: definition.description,
+        // On the model's own tool list, like the builtin webfetch — not
+        // behind 2.0's code-mode `execute` tool.
+        options: { codemode: false },
+        input: tool.schema.toJSONSchema(input),
+        execute: async (args: unknown, context: any) => {
+          // A rejected promise is a defect in 2.0 and fails the whole turn, so
+          // a failure goes back to the model as the tool's text instead.
+          try {
+            const result = await definition.execute(input.parse(args), {
+              sessionID: context.sessionID,
+              messageID: context.messageID,
+              agent: context.agent,
+              abort: context.signal,
+              directory,
+              worktree: directory,
+            })
+            const output = typeof result === "string" ? result : result.output
+            return result?.metadata ? { content: output, metadata: result.metadata } : { content: output }
+          } catch (error) {
+            return {
+              content: `Error: ${error instanceof Error ? error.message : String(error)}`,
+              metadata: { error: true },
+            }
+          }
+        },
+      })
+    }
+  })
+}
+
+export default { id: "@telemai/opencode-plugin", server: TelemPlugin, setup: setupV2 }
