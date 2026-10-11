@@ -1595,6 +1595,24 @@ export const TelemPlugin: Plugin = async ({ client, directory }, options?: Plugi
               "Optional. Set it only when the answer must come from one site: linkedin, reddit, " +
                 "or x (twitter is also accepted). Leave it unset otherwise.",
             ),
+          published_after: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "Optional. Only return results published on or after this date or date-time, in ISO 8601 " +
+                "(for example 2026-10-01 or 2026-10-01T09:00:00Z). A value with no time zone is read as UTC. " +
+                "Results with no known publication date are kept. Set it only when the task needs sources " +
+                "from a time period; leave it unset otherwise.",
+            ),
+          published_before: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "Optional. Only return results published before this date or date-time, in ISO 8601. A value " +
+                "with no time zone is read as UTC, and a date with no time includes that whole day. Results " +
+                "with no known publication date are kept. Set it only when the task needs sources from a " +
+                "time period; leave it unset otherwise.",
+            ),
         },
         async execute(args, ctx) {
           // Drop blank/whitespace-only queries so an all-empty batch is caught here
@@ -1685,11 +1703,17 @@ export const TelemPlugin: Plugin = async ({ client, directory }, options?: Plugi
           // definition-backed provider in `preprocessor_names` is a 400 ("use
           // search.providers"), so telem_search never sends that key at all.
           // The block itself rides only on deviation — absent means defaults.
-          // The model's per-call topic, trimmed, beats TELEM_TOPIC. The routing mode is
-          // never taken from the model: it comes from the autoRouting config key.
-          const topic = typeof args.topic === "string" ? args.topic.trim() : ""
+          // The model's per-call topic and publication window, trimmed; the topic beats
+          // TELEM_TOPIC. The routing mode is never taken from the model: it comes
+          // from the autoRouting config key.
+          const given = args as Record<string, unknown>
+          const perCall: Record<string, string> = {}
+          for (const key of ["topic", "published_after", "published_before"]) {
+            const value = typeof given[key] === "string" ? (given[key] as string).trim() : ""
+            if (value) perCall[key] = value
+          }
           const configured = buildSearchBlock(config)
-          const search = topic ? { ...configured, topic } : configured
+          const search = Object.keys(perCall).length ? { ...configured, ...perCall } : configured
           if (search) body.search = search
 
           const headers: Record<string, string> = { "Content-Type": "application/json" }
