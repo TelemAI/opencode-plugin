@@ -230,6 +230,21 @@ function buildSearchBlock(options: TelemOptions): Record<string, unknown> | null
   return Object.keys(block).length ? block : null
 }
 
+// The /v1/fetch `options` block (hosted-fetch-options spec F3), or null when none
+// of the three fetch keys resolved: `fetchProviders` / `fetchTier` / `fetchNoCache`
+// become `providers` / `tier` / `no_cache`, in that key order. They resolve on the
+// same six levels as the search keys. It validates nothing (the router judges the
+// names); it lowercases `tier`, and sends `no_cache` as resolved, so a file's
+// `false` is sent. The same block the other surfaces build, pinned by the shared
+// the shared config contract corpus.
+function buildFetchOptions(options: TelemOptions): Record<string, unknown> | null {
+  const block: Record<string, unknown> = {}
+  if (options.fetchProviders !== undefined) block.providers = [...options.fetchProviders]
+  if (options.fetchTier !== undefined) block.tier = options.fetchTier.toLowerCase()
+  if (options.fetchNoCache !== undefined) block.no_cache = options.fetchNoCache
+  return Object.keys(block).length ? block : null
+}
+
 // ---------------------------------------------------------------------------
 // Trajectory v5 identity (the design notes
 // The plugin computes a wire payload keyed on the opencode session's
@@ -1843,12 +1858,15 @@ export const TelemPlugin: Plugin = async ({ client, directory }, options?: Plugi
           // endpoint is extra="forbid", so no legacy user_input key. The search
           // config is never attached: those knobs select SEARCH providers, and a
           // `search` block here is rejected — only the base url and key are
-          // shared. `metadata.kind` stays: the endpoint refuses a kind that
-          // CONTRADICTS it, and "fetch" agrees.
+          // shared. The fetch keys of the same config ride as the typed
+          // `options` block, only when one resolved. `metadata.kind` stays: the
+          // endpoint refuses a kind that CONTRADICTS it, and "fetch" agrees.
           const body: Record<string, unknown> = {
             urls,
             metadata,
           }
+          const fetchOptions = buildFetchOptions(config)
+          if (fetchOptions) body.options = fetchOptions
 
           const headers: Record<string, string> = { "Content-Type": "application/json" }
           if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`
