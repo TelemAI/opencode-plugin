@@ -60,7 +60,8 @@ const FETCH_CONTENT_CAP = 20000
 const LEGACY_PROJECT_CONFIG_PATH = [".opencode", "telem.json"]
 const LEGACY_USER_CONFIG_PATH = [".config", "opencode", "telem.json"]
 
-type TelemConfig = TelemOptions & { baseUrl: string; apiKey?: string }
+// `refusal`: the config can run no search (config-core's HarnessResolution.refusal).
+type TelemConfig = TelemOptions & { baseUrl: string; apiKey?: string; refusal?: string }
 
 // Module scope: the plugin is one long-lived process, so the parse cache and the
 // notice sink outlive individual calls. The cache re-reads a file when its stat
@@ -193,14 +194,15 @@ function resolveTelemConfig(projectRoot?: string, hostOptions?: unknown): TelemC
   }
   const apiKey = process.env.TELEM_API_KEY ?? creds.apiKey
   if (apiKey) config.apiKey = apiKey
+  if (resolved.refusal !== undefined) config.refusal = resolved.refusal
   return config
 }
 
 // The V2 `search` block, or null when nothing was configured — a body
 // without the block means "server defaults", which is the common case.
-// The two provider halves are forwarded exactly as configured: include REPLACES
-// the deployment set and exclude then subtracts, both server-side, so the
-// plugin never subtracts client-side and never resolves an overlap itself.
+// When both provider halves resolve, config-core has already subtracted exclude
+// from include and dropped exclude; an exclude alone is forwarded for the server
+// to apply to the deployment set.
 // `provider_overrides` has already been through the membership guard, so what
 // arrives here names only providers this request actually selects.
 function buildSearchBlock(options: TelemOptions): Record<string, unknown> | null {
@@ -1647,6 +1649,9 @@ export const TelemPlugin: Plugin = async ({ client, directory }, options?: Plugi
           // then uses — resolving afterwards could omit against one world what
           // was only ever delivered to another.
           const config = resolveTelemConfig(directory, options)
+          // The config can run no search (exclude empties include): refuse before
+          // any request. Running without the lists would search the default set.
+          if (config.refusal !== undefined) throw new Error(config.refusal)
           const delivery: DeliveryPlan = {
             scope: cacheScope(config.baseUrl, config.apiKey),
             sentWithContext: [],

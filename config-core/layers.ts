@@ -189,6 +189,13 @@ export type HarnessResolution = {
   layers: ResolvedLayer[]
   /** Everything worth telling the user, deduped by the caller's sink. */
   notices: Notice[]
+  /**
+   * Set when this config can run no search: `providersExclude` removes every
+   * provider in `providersInclude`. The search tool returns this message instead
+   * of sending a request; a fetch does not read it. The two provider halves and
+   * `providerOverrides` are absent from `values`.
+   */
+  refusal?: string
 }
 
 type MutableValues = Record<string, unknown>
@@ -314,9 +321,12 @@ export function resolveHarnessOptions(input: HarnessLayersInput): HarnessResolut
   if (composition) notices.push(composition)
   // BEFORE the overrides guard: the guard checks membership against the include
   // the request will actually carry, which is the SUBTRACTED one.
-  const providers = composeProviders(values)
-  if (providers) notices.push(providers)
-  const guard = guardProviderOverrides(values)
+  const providers = composeProviders(values, (key) =>
+    sourcePhrase(key, sources[key] as LayerLevel, layers, input.env),
+  )
+  if (providers?.notice) notices.push(providers.notice)
+  // A refused search sends no overrides, so the guard has nothing to say.
+  const guard = providers?.refusal === undefined ? guardProviderOverrides(values) : undefined
   if (guard) notices.push(guard)
 
   return {
@@ -324,7 +334,47 @@ export function resolveHarnessOptions(input: HarnessLayersInput): HarnessResolut
     sources: sources as Partial<Record<TelemOptionKey, LayerLevel>>,
     layers,
     notices,
+    ...(providers?.refusal === undefined ? {} : { refusal: providers.refusal }),
   }
+}
+
+/**
+ * Where a provider list was set, as the end of "set …" in a refusal. The project
+ * file is named generically so that every reader copy says the same words; the
+ * other files are named by path.
+ */
+function sourcePhrase(
+  key: "providersInclude" | "providersExclude",
+  level: LayerLevel,
+  layers: readonly ResolvedLayer[],
+  env: Env,
+): string {
+  if (level === "host") return "in the plugin options"
+  if (level === "project") return "in the project's .telem/telem.json"
+  if (level === "env") {
+    const spec = TELEM_OPTIONS.find((option) => option.key === key)!
+    const names = [spec.env ?? key, ...spec.envAliases]
+    const name = names.find((n) => optionFromEnv({ ...spec, env: n, envAliases: [] }, env) !== undefined)
+    return `by ${name ?? names[0]}`
+  }
+  return `in ${layers.find((layer) => layer.level === level)?.path ?? level}`
+}
+
+/**
+ * The refusal for a config whose `providersExclude` removes every provider in its
+ * `providersInclude`. Exported so each surface's tests can state the exact text;
+ * the four reader copies build the same sentence.
+ */
+export function providersRefusal(include: readonly string[], inInclude: string, inExclude: string): string {
+  const names = include.join(", ")
+  const fix =
+    inInclude === inExclude
+      ? `Remove ${names} from one of the two lists ${inInclude}.`
+      : `Remove ${names} from providersInclude (set ${inInclude}) or from providersExclude (set ${inExclude}).`
+  return (
+    `[telem] providersExclude removes every provider in providersInclude (${names}), ` +
+    `so no provider is left and no search was sent. ${fix}`
+  )
 }
 
 /** The unified file a deprecated one should move into. */
@@ -449,14 +499,15 @@ function composeTierFields(values: MutableValues, sources: MutableSources): Noti
  *   **When both halves resolve, `exclude` is subtracted from `include` here and
  *   only the subtracted `include` is sent.**
  *
- * The server's rule 3 answers `search.providers.include` and `exclude` naming the
- * same provider with a 400, and answers an `include` that resolves to nothing
- * with a 400 as well. Both halves resolving is not exotic: they resolve PER KEY
+ * The router used to answer `search.providers.include` and `exclude` naming the
+ * same provider with a 400 (since 2026-10-26 it subtracts too, and answers 400 only
+ * when nothing is left). Both halves resolving is not exotic: they resolve PER KEY
  * over six levels, so a user file's `providersExclude` meets a project file's
  * `providersInclude` the moment two people configure the thing they each cared
  * about. Forwarding that pair verbatim made a checked-in config break every
  * search in the repository, with a message about the request rather than about
- * the file that wrote it.
+ * the file that wrote it. The client subtracts first so its message can name
+ * the file.
  *
  * Subtracting is not a reinterpretation: `include` REPLACES the deployment's
  * default set, so once it resolves it already names the whole candidate
@@ -470,11 +521,10 @@ function composeTierFields(values: MutableValues, sources: MutableSources): Noti
  * - Names actually subtracted → say which, once per edit. The user wrote both
  *   halves down; the resolved set is neither of them.
  * - Subtraction empties `include` → the config states an empty provider set,
- *   which no search can run. Dropping BOTH halves is the only answer that still
- *   searches: the deployment's default set runs, loudly, instead of every call
- *   failing. (An `include: []` on the wire is the server's 400 by design — that
- *   answer belongs to a caller who explicitly asked for nothing, not to a pair of
- *   config files that happened to cancel out.
+ *   which no search can run, so the search is REFUSED (owner design,
+ *   2026-10-26): the resolution carries `refusal`, and the search tool returns it
+ *   without sending anything. Running the deployment's default set instead could
+ *   search the very provider the user excluded.
  * - Nothing subtracted (the halves are disjoint) → silent. `exclude` was already
  *   a no-op against a set `include` fully determines, and dropping a no-op is not
  *   news.
@@ -483,11 +533,14 @@ function composeTierFields(values: MutableValues, sources: MutableSources): Noti
  * from is the deployment default, which this process cannot enumerate — so only
  * the server can apply it.
  *
- * Mirrored in `telem/config.py` (`_compose_providers`) and in the pi skill's
- * vendored reader; the shared `fixtures/wire` cases pin that the three produce
- * the same wire bytes.
+ * Mirrored in `telem/config.py` (`_compose_providers`) and in the three vendored
+ * readers; the shared `fixtures/wire` cases pin that they produce the same wire
+ * bytes and the same refusal.
  */
-function composeProviders(values: MutableValues): Notice | undefined {
+function composeProviders(
+  values: MutableValues,
+  sourceOf: (key: "providersInclude" | "providersExclude") => string,
+): { notice?: Notice; refusal?: string } | undefined {
   const include = values.providersInclude as string[] | undefined
   const exclude = values.providersExclude as string[] | undefined
   if (include === undefined || exclude === undefined) return undefined
@@ -497,31 +550,25 @@ function composeProviders(values: MutableValues): Notice | undefined {
   const dropped = include.filter((name) => excluded.has(name))
   delete values.providersExclude
 
-  // Once per EDIT: the key is the pair the statement is about, so it speaks
-  // again when either half changes and stays quiet while they hold still.
-  const key = `${include.join(",")}|${exclude.join(",")}`
   if (kept.length) {
     values.providersInclude = kept
     if (!dropped.length) return undefined
     return {
-      channel: "providers-compose",
-      key,
-      message:
-        `[telem] providersExclude removes ${dropped.join(", ")} from providersInclude: ` +
-        `this search runs ${kept.join(", ")}. A request may not name the same provider in ` +
-        "both halves, so the exclusion is applied to the config and only providersInclude " +
-        "is sent.",
+      notice: {
+        channel: "providers-compose",
+        // Once per EDIT: the key is the pair the statement is about, so it speaks
+        // again when either half changes and stays quiet while they hold still.
+        key: `${include.join(",")}|${exclude.join(",")}`,
+        message:
+          `[telem] providersExclude removes ${dropped.join(", ")} from providersInclude: ` +
+          `this search runs ${kept.join(", ")}.`,
+      },
     }
   }
   delete values.providersInclude
+  delete values.providerOverrides
   return {
-    channel: "providers-compose",
-    key,
-    message:
-      `[telem] providersExclude (${exclude.join(", ")}) removes every provider in ` +
-      `providersInclude (${include.join(", ")}): this config resolves to an EMPTY provider ` +
-      "set, which no search can run, so BOTH halves are dropped and the deployment's default " +
-      "provider set is running instead.",
+    refusal: providersRefusal(include, sourceOf("providersInclude"), sourceOf("providersExclude")),
   }
 }
 
